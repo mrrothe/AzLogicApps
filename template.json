@@ -1,0 +1,271 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "metadata": {
+        "title": "Get-Entra-AuthMethods-Logic-App",
+        "description": "This logic app will use the Microsoft Graph API to collect details of authentication methods configured on Entra ID accounts.",
+        "prerequisites": [
+            "1. An App Registration with UserAuthenticationMethod.Read.All and User.Read.All permissions",
+            "2. An existing Microsoft Sentinel Instance"
+        ],
+        "lastUpdateTime": "2025-06-24T19:00:00.000Z",
+        "tags": [
+            "Identity",
+            "MFA",
+            "Entra ID"
+        ],
+        "support": {
+            "tier": "community"
+        },
+        "author": {
+            "name": "Martin Rothe"
+        }
+    },
+    "parameters": {
+        "PlaybookName": {
+            "defaultValue": "Get-Entra-AuthMethods-Logic-App",
+            "type": "String"
+        },
+        "tenantID": {
+            "defaultValue": "",
+            "type": "String"
+        },
+        "appID": {
+            "defaultValue": "",
+            "type": "String"
+        },
+        "appSecret": {
+            "defaultValue": "",
+            "type": "secureString"
+        },
+        "workspaceID": {
+            "defaultValue": "",
+            "type": "String"
+        },
+        "workspaceKey": {
+            "defaultValue": "",
+            "type": "SecureString"
+        }
+    },
+    "variables": {
+        "LogAnalyticsConnection": "[concat('loganalytics-', parameters('PlaybookName'))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[variables('LogAnalyticsConnection')]",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "[variables('LogAnalyticsConnection')]",
+                "customParameterValues": {},
+                "nonSecretParameterValues": {},
+                "parameterValues": {
+                    "username": "[parameters('workspaceID')]",
+                    "password": "[parameters('workspaceKey')]"
+                },
+                "api": {
+                    "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azureloganalyticsdatacollector')]"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "[parameters('PlaybookName')]",
+            "location": "[resourceGroup().location]",
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "properties": {
+                "state": "Enabled",
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        }
+                    },
+                    "triggers": {
+                        "Recurrence": {
+                            "recurrence": {
+                                "interval": 24,
+                                "frequency": "Hour",
+                                "timeZone": "GMT Standard Time"
+                            },
+                            "evaluatedRecurrence": {
+                                "interval": 24,
+                                "frequency": "Hour",
+                                "timeZone": "GMT Standard Time"
+                            },
+                            "type": "Recurrence"
+                        }
+                    },
+                    "actions": {
+                        "Get_all_users_from_Graph_API": {
+                            "runAfter": {},
+                            "type": "Http",
+                            "inputs": {
+                                "uri": "https://graph.microsoft.com/v1.0/users",
+                                "method": "GET",
+                                "authentication": {
+                                    "type": "ActiveDirectoryOAuth",
+                                    "tenant": "[parameters('tenantID')]",
+                                    "audience": "https://graph.microsoft.com",
+                                    "clientId": "[parameters('appID')]",
+                                    "secret": "[parameters('appSecret')]"
+                                }
+                            },
+                            "runtimeConfiguration": {
+                                "contentTransfer": {
+                                    "transferMode": "Chunked"
+                                }
+                            }
+                        },
+                        "Parse_Users_JSON": {
+                            "runAfter": {
+                                "Get_all_users_from_Graph_API": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ParseJson",
+                            "inputs": {
+                                "content": "@body('Get_all_users_from_Graph_API')",
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "@@odata.context": {
+                                            "type": "string"
+                                        },
+                                        "value": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "businessPhones": {
+                                                        "type": "array"
+                                                    },
+                                                    "displayName": {
+                                                        "type": "string"
+                                                    },
+                                                    "givenName": {},
+                                                    "jobTitle": {},
+                                                    "mail": {
+                                                        "type": [
+                                                            "string",
+                                                            "null"
+                                                        ]
+                                                    },
+                                                    "mobilePhone": {},
+                                                    "officeLocation": {},
+                                                    "preferredLanguage": {},
+                                                    "surname": {},
+                                                    "userPrincipalName": {
+                                                        "type": "string"
+                                                    },
+                                                    "id": {
+                                                        "type": "string"
+                                                    }
+                                                },
+                                                "required": [
+                                                    "userPrincipalName",
+                                                    "id"
+                                                ]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "For_each_User": {
+                            "foreach": "@outputs('Parse_Users_JSON')?['body']?['value']",
+                            "actions": {
+                                "If_user_is_not_external": {
+                                    "actions": {
+                                        "Get_User_Auth_Methods": {
+                                            "type": "Http",
+                                            "inputs": {
+                                                "uri": "https://graph.microsoft.com/v1.0/users/@{item()?['userPrincipalName']}/authentication/methods",
+                                                "method": "GET",
+                                                "authentication": {
+                                                    "type": "ActiveDirectoryOAuth",
+                                                    "tenant": "[parameters('tenantID')]",
+                                                    "audience": "https://graph.microsoft.com",
+                                                    "clientId": "[parameters('appID')]",
+                                                    "secret": "[parameters('appSecret')]"
+                                                }
+                                            },
+                                            "runtimeConfiguration": {
+                                                "contentTransfer": {
+                                                    "transferMode": "Chunked"
+                                                }
+                                            }
+                                        },
+                                        "Send_Data_to_Sentinel": {
+                                            "runAfter": {
+                                                "Get_User_Auth_Methods": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['azureloganalyticsdatacollector']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "post",
+                                                "body": "@{body('Get_User_Auth_Methods')}",
+                                                "headers": {
+                                                    "Log-Type": "userAuthMethods"
+                                                },
+                                                "path": "/api/logs"
+                                            }
+                                        }
+                                    },
+                                    "else": {
+                                        "actions": {}
+                                    },
+                                    "expression": {
+                                        "and": [
+                                            {
+                                                "not": {
+                                                    "contains": [
+                                                        "@item()?['userPrincipalName']",
+                                                        "#EXT#"
+                                                    ]
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    "type": "If"
+                                }
+                            },
+                            "runAfter": {
+                                "Parse_Users_JSON": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Foreach"
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {
+                    "$connections": {
+                        "value": {
+                            "azureloganalyticsdatacollector": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', variables('LogAnalyticsConnection'))]",
+                                "connectionName": "[variables('LogAnalyticsConnection')]",
+                                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azureloganalyticsdatacollector')]"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ]
+}
