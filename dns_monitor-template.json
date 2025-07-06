@@ -1,0 +1,171 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "metadata": {
+        "title": "DNS-Monitor-Logic-App",
+        "description": "This logic app uses cloudflare's DOH service to grab MX records for a list of domains and store the results in Sentinel",
+        "prerequisites": [
+            "1. At least one domain with at least one MX record defined",
+            "2. An existing Microsoft Sentinel Instance"
+        ],
+        "lastUpdateTime": "2025-07-06T14:00:00.000Z",
+        "tags": [
+            "DNS",
+            "Security",
+            "Sentinel"
+        ],
+        "support": {
+            "tier": "community"
+        },
+        "author": {
+            "name": "Martin Rothe"
+        }
+    },
+    "parameters": {
+        "PlaybookName": {
+            "defaultValue": "DNS-Monitor-Logic-App",
+            "type": "String"
+        },
+        "workspaceID": {
+            "defaultValue": "",
+            "type": "String"
+        },
+        "workspaceKey": {
+            "defaultValue": "",
+            "type": "SecureString"
+        }
+    },
+    "variables": {
+        "LogAnalyticsConnection": "[concat('loganalytics-', parameters('PlaybookName'))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[variables('LogAnalyticsConnection')]",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "[variables('LogAnalyticsConnection')]",
+                "customParameterValues": {},
+                "nonSecretParameterValues": {},
+                "parameterValues": {
+                    "username": "[parameters('workspaceID')]",
+                    "password": "[parameters('workspaceKey')]"
+                },
+                "api": {
+                    "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azureloganalyticsdatacollector')]"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "[parameters('PlaybookName')]",
+            "location": "uksouth",
+            "properties": {
+                "state": "Enabled",
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        }
+                    },
+                    "triggers": {
+                        "5_Min_Timer": {
+                            "recurrence": {
+                                "interval": 5,
+                                "frequency": "Minute"
+                            },
+                            "evaluatedRecurrence": {
+                                "interval": 5,
+                                "frequency": "Minute"
+                            },
+                            "type": "Recurrence"
+                        }
+                    },
+                    "actions": {
+                        "Set_domains_variable": {
+                            "runAfter": {},
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "domains",
+                                        "type": "array",
+                                        "value": [
+                                            "example.com",
+                                            "example.org"
+                                        ]
+                                    }
+                                ]
+                            }
+                        },
+                        "For_each_domain": {
+                            "foreach": "@variables('domains')",
+                            "actions": {
+                                "DoH_Request": {
+                                    "type": "Http",
+                                    "inputs": {
+                                        "uri": "https://one.one.one.one/dns-query?name=@{items('For_each_domain')}&type=mx",
+                                        "method": "GET",
+                                        "headers": {
+                                            "accept": "application/dns-json"
+                                        }
+                                    },
+                                    "runtimeConfiguration": {
+                                        "contentTransfer": {
+                                            "transferMode": "Chunked"
+                                        }
+                                    }
+                                },
+                                "Send_DNS_Data_to_Sentinel": {
+                                    "runAfter": {
+                                        "DoH_Request": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "ApiConnection",
+                                    "inputs": {
+                                        "host": {
+                                            "connection": {
+                                                "name": "@parameters('$connections')['azureloganalyticsdatacollector']['connectionId']"
+                                            }
+                                        },
+                                        "method": "post",
+                                        "body": "@base64ToString(body('DoH_Request')?['$content'])",
+                                        "headers": {
+                                            "Log-Type": "dnsmonitor"
+                                        },
+                                        "path": "/api/logs"
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "Set_domains_variable": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Foreach"
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {
+                    "$connections": {
+                        "value": {
+                            "azureloganalyticsdatacollector": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', variables('LogAnalyticsConnection'))]",
+                                "connectionName": "[variables('LogAnalyticsConnection')]",
+                                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azureloganalyticsdatacollector')]"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ]
+}
